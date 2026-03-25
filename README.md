@@ -133,7 +133,9 @@
 ### `music_id/audio.py`
 音频加载与预处理：
 
-- 使用 `librosa.load` 读取音频
+- 优先使用 `soundfile` 读取音频
+- 必要时回退到 `librosa`
+- 如仍失败，可自动调用系统 `ffmpeg` 转码后再读取
 - 统一采样率
 - 转单声道
 - 去直流
@@ -487,7 +489,7 @@ pip install -r requirements.txt
 
 ## 10. 音频依赖说明
 
-项目使用 `librosa + soundfile` 读取音频。
+项目优先使用 `soundfile` 读取音频，并在必要时回退到 `librosa`，以提升部分 WAV / FLAC 文件的兼容性。
 
 ### 已直接支持较稳定的格式
 - wav
