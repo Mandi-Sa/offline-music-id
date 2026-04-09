@@ -70,6 +70,27 @@ def create_parser() -> argparse.ArgumentParser:
         help="Build worker threads for auto-build, e.g. --thread 2",
     )
 
+    ui_parser = subparsers.add_parser(
+        "ui",
+        help="Launch the local web UI.",
+    )
+    ui_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Web UI host, e.g. --host 127.0.0.1",
+    )
+    ui_parser.add_argument(
+        "--port",
+        type=int,
+        default=7860,
+        help="Web UI port, e.g. --port 7860",
+    )
+    ui_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the browser automatically when launching UI.",
+    )
+
     parser.add_argument(
         "-d",
         "--directory",
@@ -128,6 +149,16 @@ def run_cli(argv: Optional[list[str]] = None) -> int:
                 thread_count=args.thread,
             )
             print(format_match_output(result), end="")
+            return 0
+
+        if args.command == "ui":
+            from music_id.ui import launch_ui
+
+            launch_ui(
+                server_name=args.host,
+                server_port=args.port,
+                inbrowser=not args.no_browser,
+            )
             return 0
 
         if args.default_directory and args.default_query_file:

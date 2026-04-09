@@ -99,7 +99,8 @@
     ├── index_db.py
     ├── matcher.py
     ├── service.py
-    └── cli.py
+    ├── cli.py
+    └── ui.py
 ```
 
 ---
@@ -187,7 +188,16 @@
 
 - `build`
 - `query`
+- `ui`
 - 默认直接查询模式
+
+### `music_id/ui.py`
+本地 Web UI：
+
+- 现代化 Gradio 界面
+- 曲库配置、手动建库、自动建库识别
+- 最佳匹配、Top-K 候选、低置信提示
+- 建库失败信息与查询调试详情展示
 
 ---
 
@@ -922,7 +932,49 @@ python main.py query -d "songs/" query.mp3
 
 ---
 
-## 19. 如何运行的步骤
+## 19. 本地 Web UI 使用说明
+
+### 第一步：安装依赖
+```bash
+pip install -r requirements.txt
+```
+
+> 新增 UI 依赖：`gradio`
+
+### 第二步：启动本地 UI
+```bash
+python main.py ui
+```
+
+默认会在本机启动一个本地 Web 服务，并自动打开浏览器。
+
+可选参数：
+
+```bash
+python main.py ui --host 127.0.0.1 --port 7860 --no-browser
+```
+
+### 第三步：在 UI 中完成主流程
+1. 在“曲库配置区”填写曲库目录。
+2. 按需勾选“索引不存在时自动建库”或“强制重建索引”。
+3. 设置建库线程数。
+4. 点击“建立 / 更新索引”手动建库，或直接在“查询区”选择查询音频后点击“开始识别”。
+5. 在结果区查看：
+   - 最佳匹配
+   - Top-K 候选
+   - 置信度与关键评分
+   - 建库摘要 / 失败文件
+   - 调试详情
+
+### UI 已覆盖的关键场景
+- 索引不存在时自动建库
+- 强制重建索引后再识别
+- 低置信候选提示
+- 建库失败文件展示
+- 查询音频过短提示
+- 音频无法解码或可能缺少 `ffmpeg` 的提示
+
+## 20. CLI 使用步骤
 
 ### 第一步：安装依赖
 ```bash
@@ -957,7 +1009,7 @@ python main.py query -d "songs/" my_phone_recording.mp3
 python main.py -d "songs/" my_phone_recording.mp3
 ```
 
-## 20. 后续可优化方向
+## 21. 后续可优化方向
 
 ### 20.1 建库性能优化
 - 多进程并行提取 fingerprints
@@ -1001,14 +1053,14 @@ python main.py -d "songs/" my_phone_recording.mp3
 
 ---
 
-## 21. 开源协议
+## 22. 开源协议
 
 本项目采用 **MIT License** 开源协议发布。
 你可以自由使用、修改、分发本项目代码，但需要保留原始许可证声明。详细内容请参见仓库根目录下的 `LICENSE` 文件。
 
 ---
 
-## 22. 备注
+## 23. 备注
 
 如果你保存本项目代码、安装依赖并准备好本地曲库后，即可执行：
 
