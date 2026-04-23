@@ -11,10 +11,54 @@ from music_id.service import build_library, query_library, get_library_info, Lib
 from music_id.config import AUDIO, SPECTROGRAM, PEAKS, FINGERPRINT, MATCH, BUILD, INDEX
 from music_id.config import load_config, save_config
 
+class DebugConsole(ft.Container):
+    def __init__(self, color_text_main="#FFFFFF", color_text_sec="#B0B0B0"):
+        self.color_text_main = color_text_main
+        self.color_text_sec = color_text_sec
+        self.logs = ft.ListView(expand=True, spacing=2, auto_scroll=True)
+        
+        super().__init__(
+            content=ft.Column([
+                ft.Row([
+                    ft.Text("调试控制台", size=14, weight=ft.FontWeight.BOLD, color=self.color_text_main),
+                    ft.TextButton("清除", on_click=lambda _: self.clear_logs(), style=ft.ButtonStyle(color=self.color_text_sec)),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                self.logs,
+            ], spacing=10, expand=True),
+            bgcolor="#1A1A1A",
+            padding=10,
+            border_radius=16,
+            height=200,
+            width=400,
+        )
+
+    def add_log(self, level: str, message: str):
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        color = {
+            "INFO": self.color_text_main,
+            "DEBUG": self.color_text_sec,
+            "WARN": "orange",
+            "ERROR": "red",
+        }.get(level, self.color_text_sec)
+        
+        self.logs.controls.append(
+            ft.Text(f"[{timestamp}] [{level}] {message}",
+                    size=12, color=color, font_family="Consolas")
+        )
+        self.update()
+
+    def clear_logs(self):
+        self.logs.controls.clear()
+        self.update()
+
 class MusicIDGUI:
     def __init__(self, page: ft.Page):
         self.page = page
         load_config()
+        
+        # Debug State
+        self.debug_visible = False
         
         # State
         self.current_library_dir: Optional[Path] = None
@@ -80,6 +124,7 @@ class MusicIDGUI:
             bgcolor=self.color_surface,
             padding=15,
             border_radius=16,
+            height=200,
         )
 
     def setup_page(self):
@@ -133,14 +178,34 @@ class MusicIDGUI:
             expand=True,
         )
         
+        # Debug Console
+        self.debug_console = DebugConsole(
+            color_text_main=self.color_text_main,
+            color_text_sec=self.color_text_sec
+        )
+        self.debug_console.visible = self.debug_visible
+
+        self.player_bar.expand = True
         self.page.controls = [
             ft.Column([
                 main_layout,
-                self.player_bar
+                ft.Row([
+                    self.debug_console,
+                    self.player_bar,
+                ], alignment=ft.MainAxisAlignment.END),
             ], expand=True)
         ]
         self.page.overlay.append(self.picker)
         print("[DEBUG] Page layout and FilePicker overlay added. Updating page...")
+        self.page.update()
+
+    def log_debug(self, level: str, message: str):
+        self.debug_console.add_log(level, message)
+        self.page.update()
+
+    def toggle_debug_console(self, e):
+        self.debug_visible = not self.debug_visible
+        self.debug_console.visible = self.debug_visible
         self.page.update()
 
     def handle_nav_change(self, e):
@@ -339,6 +404,7 @@ class MusicIDGUI:
                     library_dir=self.current_library_dir, # type: ignore
                     rebuild=self.lib_rebuild_switch.value,
                     progress_callback=progress_cb,
+                    log_callback=self.log_debug,
                     stop_event=self.stop_event
                 )
                 self.lib_status_text.value = f"构建完成! 索引了 {result['song_count']} 首歌曲"
@@ -426,6 +492,7 @@ class MusicIDGUI:
                     library_dir=self.current_library_dir, # type: ignore
                     query_file=self.current_query_file, # type: ignore
                     progress_callback=progress_cb,
+                    log_callback=self.log_debug,
                     stop_event=self.stop_event
                 )
                 self.query_result_data = result
@@ -631,6 +698,20 @@ class MusicIDGUI:
             "index_dir_name": "索引目录名", "db_name": "数据库文件名", "metadata_name": "元数据文件名", "fingerprints_batch_size": "指纹写入批次大小",
         }
         settings_list = ft.Column(spacing=30, scroll=ft.ScrollMode.AUTO, expand=True)
+        
+        # Add header and debug toggle to the scrollable list
+        settings_list.controls.append(ft.Text("系统配置", size=24, weight=ft.FontWeight.BOLD, color=self.color_text_main))
+        settings_list.controls.append(ft.Divider(height=20, color="transparent"))
+        
+        debug_toggle = ft.Switch(
+            label="显示调试控制台",
+            value=self.debug_visible,
+            on_change=self.toggle_debug_console,
+            active_color=self.color_primary
+        )
+        settings_list.controls.append(ft.Row([debug_toggle], alignment=ft.MainAxisAlignment.START))
+        settings_list.controls.append(ft.Divider(height=20, color="transparent"))
+        
         for group_name, config_objs in groups.items():
             group_controls = []
             for config_obj in config_objs:
@@ -648,7 +729,7 @@ class MusicIDGUI:
                     section_controls.append(control)
                 group_controls.append(ft.Column([ft.Text(f"{config_obj.__class__.__name__}", size=14, weight=ft.FontWeight.W_500, color=self.color_text_sec), ft.Row(section_controls, wrap=True, spacing=20)], spacing=10))
             settings_list.controls.append(ft.Container(content=ft.Column([ft.Text(group_name, size=18, weight=ft.FontWeight.BOLD, color=self.color_primary), ft.Divider(height=10, color="transparent"), ft.Column(group_controls, spacing=20)]), bgcolor=self.color_card, padding=20, border_radius=16, animate_opacity=300))
-        return ft.Column([ft.Text("系统配置", size=24, weight=ft.FontWeight.BOLD, color=self.color_text_main), ft.Divider(height=20, color="transparent"), settings_list], expand=True)
+        return settings_list
 
     def update_config_val(self, obj, name, value):
         setattr(obj, name, value)

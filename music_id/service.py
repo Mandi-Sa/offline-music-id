@@ -185,6 +185,7 @@ def _build_sequential_with_buffer(
     failed: List[Dict],
     write_batch_size: int,
     progress_callback: Optional[Callable] = None,
+    log_callback: Optional[Callable[[str, str], None]] = None,
     stop_event: Optional[threading.Event] = None,
 ) -> int:
     write_queue: Queue = Queue(maxsize=max(write_batch_size, 1))
@@ -202,9 +203,8 @@ def _build_sequential_with_buffer(
                 break
             if progress_callback:
                 progress_callback(i + 1, len(files_to_process), f"Processing: {audio_path.name}")
-            else:
-                # Fallback to tqdm if no callback provided
-                pass # (tqdm logic would go here or be handled by the caller)
+            if log_callback:
+                log_callback("DEBUG", f"处理文件 [{i+1}/{len(files_to_process)}]: {audio_path.name}")
             
             # To keep it simple and compatible with existing CLI,
             # I'll use a custom progress wrapper or just check for callback.
@@ -212,6 +212,8 @@ def _build_sequential_with_buffer(
                 item = _process_audio_for_index(str(audio_path), stop_event=stop_event)
                 write_queue.put(item)
             except Exception as exc:
+                if log_callback:
+                    log_callback("WARN", f"文件处理失败 {audio_path.name}: {str(exc)}")
                 failed.append(
                     {
                         "file": str(audio_path),
@@ -237,6 +239,7 @@ def _build_async_writer_pipeline(
     write_batch_size: int,
     write_queue_size: int,
     progress_callback: Optional[Callable] = None,
+    log_callback: Optional[Callable[[str, str], None]] = None,
     stop_event: Optional[threading.Event] = None,
 ) -> int:
     """
@@ -269,6 +272,8 @@ def _build_async_writer_pipeline(
                 # We only check it in the main loop.
                 future = executor.submit(_process_audio_for_index, audio_path)
                 in_flight[future] = audio_path
+                if log_callback:
+                    log_callback("DEBUG", f"提交任务: {audio_path}")
                 next_submit += 1
 
             while in_flight:
@@ -286,7 +291,11 @@ def _build_async_writer_pipeline(
                         if writer_state["error"] is not None:
                             raise writer_state["error"]
                         write_queue.put(item)
+                        if log_callback:
+                            log_callback("DEBUG", f"完成处理: {audio_path}")
                     except Exception as exc:
+                        if log_callback:
+                            log_callback("WARN", f"任务失败 {audio_path}: {str(exc)}")
                         failed.append(
                             {
                                 "file": audio_path,
@@ -324,6 +333,7 @@ def build_library(
     rebuild: bool = False,
     thread_count: int | None = None,
     progress_callback: Optional[Callable] = None,
+    log_callback: Optional[Callable[[str, str], None]] = None,
     stop_event: Optional[threading.Event] = None,
 ) -> Dict:
     library_dir = Path(library_dir).resolve()
@@ -344,6 +354,8 @@ def build_library(
     )
 
     files_to_process, skipped = _iter_files_to_update(files, song_records, rebuild=rebuild)
+    if log_callback:
+        log_callback("INFO", f"扫描完成: 发现 {len(files)} 个文件, 需处理 {len(files_to_process)} 个, 跳过 {skipped} 个")
 
     failed: List[Dict] = []
     runtime = _resolve_build_runtime(thread_count)
@@ -359,6 +371,7 @@ def build_library(
             failed=failed,
             write_batch_size=write_batch_size,
             progress_callback=progress_callback,
+            log_callback=log_callback,
             stop_event=stop_event,
         )
     else:
@@ -371,6 +384,7 @@ def build_library(
             write_batch_size=write_batch_size,
             write_queue_size=write_queue_size,
             progress_callback=progress_callback,
+            log_callback=log_callback,
             stop_event=stop_event,
         )
 
@@ -464,13 +478,13 @@ def get_library_info(library_dir: Path) -> Dict:
             
     return info
 
-
 def query_library(
     library_dir: Path,
     query_file: Path,
     auto_build: bool = True,
     thread_count: int | None = None,
     progress_callback: Optional[Callable[[str], None]] = None,
+    log_callback: Optional[Callable[[str, str], None]] = None,
     stop_event: Optional[threading.Event] = None,
 ) -> MatchResult:
     library_dir = Path(library_dir).resolve()
@@ -492,6 +506,8 @@ def query_library(
             raise QueryError("任务已停止")
         if progress_callback:
             progress_callback("加载音频...")
+        if log_callback:
+            log_callback("INFO", f"加载查询文件: {query_file.name}")
         try:
             y, sr = load_audio(query_file, sample_rate=AUDIO.sample_rate)
         except AudioLoadError as exc:
@@ -501,6 +517,8 @@ def query_library(
             raise QueryError("任务已停止")
         if progress_callback:
             progress_callback("验证音频时长...")
+        if log_callback:
+            log_callback("DEBUG", "验证音频时长...")
         try:
             validate_query_duration(y, sr)
         except ValueError as exc:
@@ -510,8 +528,11 @@ def query_library(
             raise QueryError("任务已停止")
         if progress_callback:
             progress_callback("提取指纹...")
+        if log_callback:
+            log_callback("INFO", "提取指纹中...")
         peaks, query_fingerprints, stats = extract_fingerprints(y, sr)
-        print(f"[DEBUG] Extracted {len(query_fingerprints)} fingerprints. Peaks: {len(peaks)}")
+        if log_callback:
+            log_callback("DEBUG", f"提取完成: {len(query_fingerprints)} 个指纹, {len(peaks)} 个峰值")
         if not query_fingerprints:
             raise QueryError("No fingerprints extracted from query audio.")
 
@@ -519,6 +540,8 @@ def query_library(
             raise QueryError("任务已停止")
         if progress_callback:
             progress_callback("检索曲库...")
+        if log_callback:
+            log_callback("INFO", "开始检索曲库...")
         return match_query(
             query_fingerprints=query_fingerprints,
             index=index,
