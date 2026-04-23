@@ -1,5 +1,9 @@
 import flet as ft
 import threading
+import os
+import time
+import librosa
+import pygame
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +26,11 @@ class MusicIDGUI:
         self.query_result_data = None
         self.stop_event = threading.Event()
         self.is_playing_audio = False
+        self.audio_duration = 0
+        self.is_seeking = False
+        self.playback_thread = None
+        self.current_offset = 0
+        self.current_playing_path: Optional[Path] = None
         
         # File Picker
         self.picker = ft.FilePicker()
@@ -29,6 +38,49 @@ class MusicIDGUI:
         
         print("[DEBUG] Initializing MusicIDGUI...")
         self.setup_page()
+
+    def create_player_bar(self):
+        # Initialize playback components as class attributes for global access
+        self.progress_slider = ft.Slider(
+            min=0, max=100, value=0,
+            on_change=self.handle_seek,
+            active_color=self.color_primary,
+        )
+        self.time_text = ft.Text("00:00 / 00:00", size=12, color=self.color_text_sec)
+        self.volume_slider = ft.Slider(
+            min=0, max=1, value=1.0,
+            on_change=self.handle_volume,
+            active_color=self.color_primary,
+            width=120,
+        )
+        self.current_song_text = ft.Text("未在播放", size=14, color=self.color_text_sec, italic=True)
+
+        self.audio_controls = ft.Row([
+            ft.IconButton("pause", icon_color=self.color_text_main, on_click=self.pause_audio, tooltip="暂停"),
+            ft.IconButton("play_arrow", icon_color=self.color_text_main, on_click=self.resume_audio, tooltip="继续"),
+            ft.IconButton("stop", icon_color=self.color_text_main, on_click=self.stop_audio, tooltip="停止"),
+        ], alignment=ft.MainAxisAlignment.CENTER, spacing=10)
+
+        return ft.Container(
+            content=ft.Column([
+                ft.Row([
+                    ft.Icon("music_note", color=self.color_primary, size=20),
+                    self.current_song_text,
+                    ft.Row([
+                        ft.Icon("volume_up", size=16, color=self.color_text_sec),
+                        self.volume_slider,
+                    ], alignment=ft.MainAxisAlignment.END),
+                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                ft.Row([
+                    self.audio_controls,
+                    self.time_text,
+                ], alignment=ft.MainAxisAlignment.CENTER),
+                self.progress_slider,
+            ], spacing=10),
+            bgcolor=self.color_surface,
+            padding=15,
+            border_radius=16,
+        )
 
     def setup_page(self):
         self.page.title = "Music-ID 离线识曲"
@@ -73,11 +125,20 @@ class MusicIDGUI:
             expand=True,
         )
 
+        # Global Player Bar
+        self.player_bar = self.create_player_bar()
+
         main_layout = ft.Row(
             [self.nav_rail, self.content_area],
             expand=True,
         )
-        self.page.controls.append(main_layout)
+        
+        self.page.controls = [
+            ft.Column([
+                main_layout,
+                self.player_bar
+            ], expand=True)
+        ]
         self.page.overlay.append(self.picker)
         print("[DEBUG] Page layout and FilePicker overlay added. Updating page...")
         self.page.update()
@@ -311,26 +372,28 @@ class MusicIDGUI:
         return ft.Column([
             ft.Text("识曲查询", size=24, weight=ft.FontWeight.BOLD, color=self.color_text_main),
             ft.Divider(height=20, color="transparent"),
-            ft.Container(
-                content=ft.Column([
-                    ft.Text("上传音频片段", size=18, weight=ft.FontWeight.W_500),
-                    ft.Row([
-                        ft.ElevatedButton("选择文件", icon="upload_file", on_click=lambda _: self.picker.pick_files(),
-                            style=ft.ButtonStyle(bgcolor=self.color_primary, color=self.color_bg)),
-                        self.query_file_text,
-                    ], alignment=ft.MainAxisAlignment.START),
-                    ft.Row([self.query_start_btn, self.query_stop_btn], alignment=ft.MainAxisAlignment.START),
-                ], spacing=20), bgcolor=self.color_card, padding=20, border_radius=16,
-            ),
-            ft.Divider(height=30, color="transparent", visible=not self.is_querying),
             ft.Column([
-                ft.Text("识别进度", size=20, weight=ft.FontWeight.W_500, visible=self.is_querying),
-                self.query_progress_bar,
-                self.query_status_text,
-            ], spacing=10, visible=self.is_querying),
-            ft.Divider(height=30, color="transparent", visible=not self.is_querying),
-            ft.Text("识别结果", size=20, weight=ft.FontWeight.W_500, visible=not self.is_querying),
-            ft.Column([self.query_result_container], visible=not self.is_querying),
+                ft.Container(
+                    content=ft.Column([
+                        ft.Text("上传音频片段", size=18, weight=ft.FontWeight.W_500),
+                        ft.Row([
+                            ft.ElevatedButton("选择文件", icon="upload_file", on_click=lambda _: self.picker.pick_files(),
+                                style=ft.ButtonStyle(bgcolor=self.color_primary, color=self.color_bg)),
+                            self.query_file_text,
+                        ], alignment=ft.MainAxisAlignment.START),
+                        ft.Row([self.query_start_btn, self.query_stop_btn], alignment=ft.MainAxisAlignment.START),
+                    ], spacing=20), bgcolor=self.color_card, padding=20, border_radius=16,
+                ),
+                ft.Divider(height=30, color="transparent", visible=not self.is_querying),
+                ft.Column([
+                    ft.Text("识别进度", size=20, weight=ft.FontWeight.W_500, visible=self.is_querying),
+                    self.query_progress_bar,
+                    self.query_status_text,
+                ], spacing=10, visible=self.is_querying),
+                ft.Divider(height=30, color="transparent", visible=not self.is_querying),
+                ft.Text("识别结果", size=20, weight=ft.FontWeight.W_500, visible=not self.is_querying),
+                ft.Column([self.query_result_container], visible=not self.is_querying),
+            ], scroll=ft.ScrollMode.AUTO, expand=True),
         ], expand=True)
 
     def start_query(self, e):
@@ -399,6 +462,56 @@ class MusicIDGUI:
             self.query_stop_btn.disabled = True
         self.page.update()
 
+    def format_time(self, seconds: float) -> str:
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{mins:02d}:{secs:02d}"
+
+    def handle_seek(self, e):
+        self.is_seeking = True
+        try:
+            if pygame.mixer.music.get_busy():
+                # pygame.mixer.music.set_pos is in seconds for some formats, but behavior varies.
+                # For MP3 it might not work as expected.
+                pygame.mixer.music.set_pos(e.control.value)
+                self.current_offset = e.control.value
+            else:
+                print("[DEBUG] Seek ignored: Music isn't playing")
+        except Exception as e:
+            print(f"Seek error: {e}")
+        self.is_seeking = False
+
+    def handle_volume(self, e):
+        try:
+            pygame.mixer.music.set_volume(e.control.value)
+        except Exception as e:
+            print(f"Volume error: {e}")
+
+    def update_playback_progress(self):
+        while self.is_playing_audio:
+            if not pygame.mixer.music.get_busy():
+                # Music finished or stopped naturally
+                self.is_playing_audio = False
+                self.current_song_text.value = "未在播放"
+                self.progress_slider.value = 0
+                self.time_text.value = "00:00 / 00:00"
+                self.page.update()
+                break
+
+            if not self.is_seeking and self.progress_slider and self.time_text:
+                try:
+                    # get_pos() returns ms since play() or set_pos() was called
+                    current_pos = self.current_offset + (pygame.mixer.music.get_pos() / 1000)
+                    if self.audio_duration > 0:
+                        # Clamp value to avoid "value must be less than or equal to max" error
+                        clamped_pos = min(current_pos, self.audio_duration)
+                        self.progress_slider.value = clamped_pos
+                        self.time_text.value = f"{self.format_time(clamped_pos)} / {self.format_time(self.audio_duration)}"
+                        self.page.update()
+                except Exception as e:
+                    print(f"Update progress error: {e}")
+            time.sleep(0.5)
+
     def display_query_results(self, result):
         if not hasattr(self, 'query_result_container') or result is None: return
         top = result.best
@@ -406,18 +519,27 @@ class MusicIDGUI:
             self.query_result_container.controls = [ft.Text("未找到匹配结果", weight=ft.FontWeight.W_400, color=self.color_text_sec)]
             self.page.update()
             return
-        self.audio_controls = ft.Row([
-            ft.IconButton("pause", icon_color=self.color_text_main, on_click=self.pause_audio, tooltip="暂停"),
-            ft.IconButton("play_arrow", icon_color=self.color_text_main, on_click=self.resume_audio, tooltip="继续"),
-            ft.IconButton("stop", icon_color=self.color_text_main, on_click=self.stop_audio, tooltip="停止"),
-        ], alignment=ft.MainAxisAlignment.CENTER, visible=False)
+        
+        # File size formatting
+        try:
+            file_size = os.path.getsize(top.path)
+            if file_size < 1024 * 1024:
+                size_str = f"{file_size / 1024:.1f} KB"
+            else:
+                size_str = f"{file_size / (1024 * 1024):.1f} MB"
+        except Exception:
+            size_str = "未知大小"
+        
         top_card = ft.Container(
             content=ft.Column([
                 ft.Row([
-                    ft.Icon("musicmusic_note", color=self.color_primary, size=30),
+                    ft.Icon("music_note", color=self.color_primary, size=30),
                     ft.Column([
                         ft.Text(f"最佳匹配: {top.path}", size=18, weight=ft.FontWeight.BOLD, color=self.color_text_main),
-                        ft.Text(f"置信度得分: {top.score:.2f}", weight=ft.FontWeight.W_400, color=self.color_text_sec),
+                        ft.Row([
+                            ft.Text(f"置信度得分: {top.score:.2f}", weight=ft.FontWeight.W_400, color=self.color_text_sec),
+                            ft.Text(f" | 文件大小: {size_str}", weight=ft.FontWeight.W_400, color=self.color_text_sec),
+                        ]),
                     ], expand=True),
                     ft.IconButton("play_arrow", icon_color=self.color_primary, on_click=lambda _: self.play_audio(top.path)),
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
@@ -434,7 +556,7 @@ class MusicIDGUI:
                     ]), bgcolor=self.color_card, padding=10, border_radius=8, animate_opacity=500, opacity=0,
                 )
             )
-        self.query_result_container.controls = [top_card, self.audio_controls, candidates_list]
+        self.query_result_container.controls = [top_card, candidates_list]
         self.page.update()
         top_card.offset = ft.Offset(0, 0)
         for control in candidates_list.controls:
@@ -442,14 +564,38 @@ class MusicIDGUI:
         self.page.update()
 
     def play_audio(self, path):
-        import pygame
         try:
             if not pygame.mixer.get_init(): pygame.mixer.init()
+            
+            # Update current playing state
+            self.current_playing_path = Path(path)
+            self.current_song_text.value = f"正在播放: {self.current_playing_path.name}"
+            
+            # Get duration using librosa for accuracy
+            self.audio_duration = librosa.get_duration(path=str(path))
+            self.current_offset = 0
+            
             pygame.mixer.music.load(str(path))
             pygame.mixer.music.play()
-            self.audio_controls.visible = True
+            
+            self.is_playing_audio = True
+            self.progress_slider.max = self.audio_duration
+            self.progress_slider.value = 0
+            self.time_text.value = f"00:00 / {self.format_time(self.audio_duration)}"
+            
+            # The player bar is always visible now, but we can update its appearance if needed
+            # self.player_bar.visible = True # It's already in the layout
+            
+            # Start update thread
+            if self.playback_thread and self.playback_thread.is_alive():
+                pass # already running
+            else:
+                self.playback_thread = threading.Thread(target=self.update_playback_progress, daemon=True)
+                self.playback_thread.start()
+                
             self.page.update()
-        except Exception as e: print(f"Audio playback error: {e}")
+        except Exception as e:
+            print(f"Audio playback error: {e}")
 
     def pause_audio(self, e):
         import pygame
@@ -462,10 +608,12 @@ class MusicIDGUI:
         except Exception as e: print(f"Resume audio error: {e}")
 
     def stop_audio(self, e):
-        import pygame
         try:
             pygame.mixer.music.stop()
-            self.audio_controls.visible = False
+            self.is_playing_audio = False
+            self.current_song_text.value = "未在播放"
+            self.progress_slider.value = 0
+            self.time_text.value = "00:00 / 00:00"
             self.page.update()
         except Exception as e: print(f"Stop audio error: {e}")
 
