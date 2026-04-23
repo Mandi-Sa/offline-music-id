@@ -3,3 +3,5 @@ scipy>=1.10
 librosa>=0.10
 soundfile>=0.12
 tqdm>=4.66
+flet<0.80.0
+pygame>=2.5.0

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import List, Sequence, Tuple, Optional
 
 import librosa
 import numpy as np
@@ -52,7 +52,7 @@ def compute_spectrogram_db(
     return spec_db
 
 
-def find_spectral_peaks(spec_db: np.ndarray, sr: int) -> List[Peak]:
+def find_spectral_peaks(spec_db: np.ndarray, sr: int, stop_event: Optional[any] = None) -> List[Peak]:
     """
     Detect stable local maxima with basic noise suppression and peak-density control.
 
@@ -99,6 +99,8 @@ def find_spectral_peaks(spec_db: np.ndarray, sr: int) -> List[Peak]:
 
     peaks: List[Peak] = []
     for t in range(num_frames):
+        if stop_event and stop_event.is_set():
+            return []
         frame_values = working_spec[:, t]
         finite_values = frame_values[np.isfinite(frame_values)]
         if finite_values.size == 0:
@@ -140,6 +142,7 @@ def build_fingerprints(
     sr: int,
     hop_length: int = SPECTROGRAM.hop_length,
     n_fft: int = SPECTROGRAM.n_fft,
+    stop_event: Optional[any] = None,
 ) -> List[Fingerprint]:
     """
     Build anchor-target fingerprints using a forward target zone.
@@ -161,10 +164,14 @@ def build_fingerprints(
     fingerprints: List[Fingerprint] = []
 
     for i in range(0, len(peaks), max(1, FINGERPRINT.anchor_step)):
+        if stop_event and stop_event.is_set():
+            return []
         anchor = peaks[i]
         pair_count = 0
 
         for j in range(i + 1, len(peaks)):
+            if stop_event and stop_event.is_set():
+                return []
             target = peaks[j]
             dt = target.time_bin - anchor.time_bin
 
@@ -224,10 +231,13 @@ def hash_triplet(freq1_bin: int, freq2_bin: int, delta_t_bin: int) -> int:
 def extract_fingerprints(
     y: np.ndarray,
     sr: int,
+    stop_event: Optional[any] = None,
 ) -> Tuple[List[Peak], List[Fingerprint], FingerprintExtractionStats]:
     spec_db = compute_spectrogram_db(y, sr)
-    peaks = find_spectral_peaks(spec_db, sr=sr)
-    fingerprints = build_fingerprints(peaks, sr)
+    peaks = find_spectral_peaks(spec_db, sr=sr, stop_event=stop_event)
+    if stop_event and stop_event.is_set():
+        return [], [], FingerprintExtractionStats(0, 0, 0, 0)
+    fingerprints = build_fingerprints(peaks, sr, stop_event=stop_event)
     stats = FingerprintExtractionStats(
         peak_count=len(peaks),
         fingerprint_count=len(fingerprints),

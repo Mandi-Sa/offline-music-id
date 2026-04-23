@@ -5,7 +5,7 @@ from pathlib import Path
 SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".flac", ".m4a"}
 
 
-@dataclass(frozen=True)
+@dataclass
 class AudioConfig:
     sample_rate: int = 11025
     mono: bool = True
@@ -14,7 +14,7 @@ class AudioConfig:
     highpass_cutoff_hz: float = 80.0
 
 
-@dataclass(frozen=True)
+@dataclass
 class SpectrogramConfig:
     n_fft: int = 2048
     hop_length: int = 256
@@ -22,7 +22,7 @@ class SpectrogramConfig:
     top_db: float = 80.0
 
 
-@dataclass(frozen=True)
+@dataclass
 class PeakDetectionConfig:
     amp_min_db: float = 18.0
     neighborhood_freq_bins: int = 17
@@ -34,7 +34,7 @@ class PeakDetectionConfig:
     min_frame_peak_percentile: float = 75.0
 
 
-@dataclass(frozen=True)
+@dataclass
 class FingerprintConfig:
     fan_value: int = 10
     target_zone_start_s: float = 0.35
@@ -47,7 +47,7 @@ class FingerprintConfig:
     include_freq_delta: bool = True
 
 
-@dataclass(frozen=True)
+@dataclass
 class MatchConfig:
     top_k: int = 3
     min_query_duration_s: float = 3.0
@@ -62,22 +62,73 @@ class MatchConfig:
     score_concentration_weight: float = 0.08
 
 
-@dataclass(frozen=True)
+import os
+import json
+from pathlib import Path
+from dataclasses import asdict
+
+CONFIG_FILE = Path("config.json")
+
+def save_config():
+    """Saves all global configuration objects to a JSON file."""
+    config_data = {
+        "AUDIO": asdict(AUDIO),
+        "SPECTROGRAM": asdict(SPECTROGRAM),
+        "PEAKS": asdict(PEAKS),
+        "FINGERPRINT": asdict(FINGERPRINT),
+        "MATCH": asdict(MATCH),
+        "BUILD": asdict(BUILD),
+        "DEBUG": asdict(DEBUG),
+        "INDEX": asdict(INDEX),
+    }
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config_data, f, indent=4)
+    except Exception as e:
+        print(f"[ERROR] Failed to save config: {e}")
+
+def load_config():
+    """Loads configuration from a JSON file and updates global objects."""
+    if not CONFIG_FILE.exists():
+        return
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            # Map of object names to the actual global objects
+            objs = {
+                "AUDIO": AUDIO,
+                "SPECTROGRAM": SPECTROGRAM,
+                "PEAKS": PEAKS,
+                "FINGERPRINT": FINGERPRINT,
+                "MATCH": MATCH,
+                "BUILD": BUILD,
+                "DEBUG": DEBUG,
+                "INDEX": INDEX,
+            }
+            for obj_name, values in data.items():
+                obj = objs.get(obj_name)
+                if obj:
+                    for k, v in values.items():
+                        setattr(obj, k, v)
+    except Exception as e:
+        print(f"[ERROR] Failed to load config: {e}")
+
+@dataclass
 class BuildConfig:
     sequential_scan: bool = True
-    max_workers: int = 2
+    max_workers: int = os.cpu_count() or 2
     prefetch_window: int = 2
     commit_every_n_files: int = 32
     prefer_locality_order: bool = True
 
 
-@dataclass(frozen=True)
+@dataclass
 class DebugConfig:
     enabled: bool = True
     top_candidate_details: int = 3
 
 
-@dataclass(frozen=True)
+@dataclass
 class IndexConfig:
     index_dir_name: str = ".fingerprint_index"
     db_name: str = "index.db"

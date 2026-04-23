@@ -107,6 +107,7 @@ def match_query(
     song_unique_hashes: Dict[int, set[int]] = defaultdict(set)
 
     all_hits = index.query_hashes(query_map.keys())
+    print(f"[DEBUG] match_query: query_hashes returned {len(all_hits)} hits")
     for hash_value, song_id, db_anchor_time in all_hits:
         query_times = query_map.get(hash_value)
         if not query_times:
@@ -119,6 +120,7 @@ def match_query(
             song_offset_votes[song_id][binned_offset] += 1
             song_matched_hashes[song_id] += 1
 
+    print(f"[DEBUG] match_query: song_offset_votes count: {len(song_offset_votes)}")
     if not song_offset_votes:
         return MatchResult(
             best=None,

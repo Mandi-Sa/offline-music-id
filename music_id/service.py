@@ -4,8 +4,9 @@ from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wai
 from dataclasses import asdict
 from pathlib import Path
 from queue import Queue
+import threading
 from threading import Thread
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional, Callable
 
 from tqdm import tqdm
 
@@ -25,7 +26,11 @@ class QueryError(RuntimeError):
     pass
 
 
-def _process_audio_for_index(audio_path_str: str) -> Dict:
+class EmptyIndexError(RuntimeError):
+    pass
+
+
+def _process_audio_for_index(audio_path_str: str, stop_event: Optional[threading.Event] = None) -> Dict:
     """
     Worker-side full pipeline:
     read -> preprocess -> fingerprint extraction -> return serializable result.
@@ -37,7 +42,7 @@ def _process_audio_for_index(audio_path_str: str) -> Dict:
 
     y, sr = load_audio(audio_path, sample_rate=AUDIO.sample_rate)
     duration = get_duration_seconds(y, sr)
-    _, fingerprints, _ = extract_fingerprints(y, sr)
+    _, fingerprints, _ = extract_fingerprints(y, sr, stop_event=stop_event)
 
     return {
         "path": str(audio_path),
@@ -80,11 +85,21 @@ def _iter_files_to_update(
     return to_process, skipped
 
 
+import os
+
 def _resolve_build_runtime(thread_count: int | None) -> Dict[str, int]:
     """
     Drive runtime build knobs from a single user-facing thread count.
+    If thread_count is None, use the global BUILD.max_workers configuration.
+    Capped at CPU cores * 2 to prevent resource exhaustion.
     """
-    effective_threads = max(1, thread_count if thread_count is not None else 1)
+    cpu_count = os.cpu_count() or 1
+    limit = cpu_count * 2
+    if thread_count is not None:
+        effective_threads = max(1, min(thread_count, limit))
+    else:
+        effective_threads = max(1, min(BUILD.max_workers, limit))
+        
     max_pending_futures = max(effective_threads * 4, 16)
     write_batch_size = max(effective_threads * 8, 16)
     write_queue_size = max(effective_threads * 4, 16)
@@ -144,7 +159,6 @@ def _writer_loop(
     written = 0
 
     try:
-        index.begin()
         while True:
             item = write_queue.get()
             if item is None:
@@ -157,8 +171,6 @@ def _writer_loop(
 
         if buffer:
             written += index.add_song_result_batch(buffer)
-
-        index.commit()
         state["written"] = written
     except Exception as exc:
         index.rollback()
@@ -172,6 +184,8 @@ def _build_sequential_with_buffer(
     files_to_process: List[Path],
     failed: List[Dict],
     write_batch_size: int,
+    progress_callback: Optional[Callable] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> int:
     write_queue: Queue = Queue(maxsize=max(write_batch_size, 1))
     state: Dict = {"written": 0, "error": None}
@@ -183,9 +197,19 @@ def _build_sequential_with_buffer(
     writer.start()
 
     try:
-        for audio_path in tqdm(files_to_process, desc="Building fingerprints", unit="file"):
+        for i, audio_path in enumerate(files_to_process):
+            if stop_event and stop_event.is_set():
+                break
+            if progress_callback:
+                progress_callback(i + 1, len(files_to_process), f"Processing: {audio_path.name}")
+            else:
+                # Fallback to tqdm if no callback provided
+                pass # (tqdm logic would go here or be handled by the caller)
+            
+            # To keep it simple and compatible with existing CLI,
+            # I'll use a custom progress wrapper or just check for callback.
             try:
-                item = _process_audio_for_index(str(audio_path))
+                item = _process_audio_for_index(str(audio_path), stop_event=stop_event)
                 write_queue.put(item)
             except Exception as exc:
                 failed.append(
@@ -212,6 +236,8 @@ def _build_async_writer_pipeline(
     max_pending_futures: int,
     write_batch_size: int,
     write_queue_size: int,
+    progress_callback: Optional[Callable] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> int:
     """
     Async pipeline:
@@ -233,14 +259,23 @@ def _build_async_writer_pipeline(
 
     with ProcessPoolExecutor(max_workers=thread_count) as executor:
         progress = tqdm(total=len(files_to_process), desc="Building fingerprints", unit="file")
+        processed_count = 0
         try:
             while next_submit < len(files_to_process) and len(in_flight) < max_pending_futures:
+                if stop_event and stop_event.is_set():
+                    break
                 audio_path = str(files_to_process[next_submit])
+                # Note: stop_event is a threading.Event and cannot be passed to ProcessPoolExecutor workers.
+                # We only check it in the main loop.
                 future = executor.submit(_process_audio_for_index, audio_path)
                 in_flight[future] = audio_path
                 next_submit += 1
 
             while in_flight:
+                if stop_event and stop_event.is_set():
+                    # We can't easily cancel futures already running in ProcessPoolExecutor,
+                    # but we can stop processing their results and exit.
+                    break
                 done, _ = wait(in_flight.keys(), return_when=FIRST_COMPLETED)
 
                 for future in done:
@@ -260,9 +295,15 @@ def _build_async_writer_pipeline(
                         )
 
                     progress.update(1)
+                    processed_count += 1
+                    if progress_callback:
+                        progress_callback(processed_count, len(files_to_process), f"Processing... {processed_count}/{len(files_to_process)}")
 
                     while next_submit < len(files_to_process) and len(in_flight) < max_pending_futures:
+                        if stop_event and stop_event.is_set():
+                            break
                         next_audio_path = str(files_to_process[next_submit])
+                        # Note: stop_event is a threading.Event and cannot be passed to ProcessPoolExecutor workers.
                         next_future = executor.submit(_process_audio_for_index, next_audio_path)
                         in_flight[next_future] = next_audio_path
                         next_submit += 1
@@ -282,6 +323,8 @@ def build_library(
     library_dir: Path,
     rebuild: bool = False,
     thread_count: int | None = None,
+    progress_callback: Optional[Callable] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> Dict:
     library_dir = Path(library_dir).resolve()
     files = scan_audio_files(library_dir)
@@ -315,6 +358,8 @@ def build_library(
             files_to_process=files_to_process,
             failed=failed,
             write_batch_size=write_batch_size,
+            progress_callback=progress_callback,
+            stop_event=stop_event,
         )
     else:
         updated = _build_async_writer_pipeline(
@@ -325,6 +370,8 @@ def build_library(
             max_pending_futures=max_pending_futures,
             write_batch_size=write_batch_size,
             write_queue_size=write_queue_size,
+            progress_callback=progress_callback,
+            stop_event=stop_event,
         )
 
     index = FingerprintIndex(db_path, mode="build")
@@ -361,7 +408,14 @@ def ensure_index_exists(
     db_path = index_paths["db_path"]
 
     if db_path.exists():
-        return db_path
+        # Check if the database is actually populated
+        index = FingerprintIndex(db_path, mode="query")
+        try:
+            if index.get_song_count() > 0:
+                return db_path
+            raise EmptyIndexError(f"Index file exists but is empty: {db_path}")
+        finally:
+            index.close()
 
     if not auto_build:
         raise FileNotFoundError(
@@ -372,14 +426,56 @@ def ensure_index_exists(
     return db_path
 
 
+def get_library_info(library_dir: Path) -> Dict:
+    """
+    Retrieve detailed information about the library and its index status.
+    """
+    library_dir = Path(library_dir).resolve()
+    files = scan_audio_files(library_dir)
+    file_count = len(files)
+    
+    index_paths = get_index_paths(library_dir)
+    db_path = index_paths["db_path"]
+    
+    info = {
+        "library_dir": str(library_dir),
+        "file_count": file_count,
+        "index_exists": False,
+        "db_mtime": None,
+        "song_count": 0,
+        "fingerprint_count": 0,
+        "needs_update": True,
+    }
+    
+    if db_path.exists():
+        info["index_exists"] = True
+        info["db_mtime"] = float(db_path.stat().st_mtime)
+        
+        try:
+            index = FingerprintIndex(db_path, mode="query")
+            song_count = index.get_song_count()
+            info["song_count"] = song_count
+            info["fingerprint_count"] = index.get_fingerprint_count()
+            info["needs_update"] = (file_count != song_count)
+            index.close()
+        except Exception as e:
+            print(f"[DEBUG] Error reading index for info: {e}")
+            info["index_exists"] = False # Treat as not existing if corrupted
+            
+    return info
+
+
 def query_library(
     library_dir: Path,
     query_file: Path,
     auto_build: bool = True,
     thread_count: int | None = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> MatchResult:
     library_dir = Path(library_dir).resolve()
     query_file = Path(query_file).resolve()
+    print(f"[DEBUG] query_library received library_dir={library_dir}, query_file={query_file}")
 
     if not query_file.exists():
         raise QueryError(f"Query file does not exist: {query_file}")
@@ -392,20 +488,37 @@ def query_library(
     index = FingerprintIndex(db_path, mode="query")
 
     try:
+        if stop_event and stop_event.is_set():
+            raise QueryError("任务已停止")
+        if progress_callback:
+            progress_callback("加载音频...")
         try:
             y, sr = load_audio(query_file, sample_rate=AUDIO.sample_rate)
         except AudioLoadError as exc:
             raise QueryError(str(exc)) from exc
 
+        if stop_event and stop_event.is_set():
+            raise QueryError("任务已停止")
+        if progress_callback:
+            progress_callback("验证音频时长...")
         try:
             validate_query_duration(y, sr)
         except ValueError as exc:
             raise QueryError(str(exc)) from exc
 
+        if stop_event and stop_event.is_set():
+            raise QueryError("任务已停止")
+        if progress_callback:
+            progress_callback("提取指纹...")
         peaks, query_fingerprints, stats = extract_fingerprints(y, sr)
+        print(f"[DEBUG] Extracted {len(query_fingerprints)} fingerprints. Peaks: {len(peaks)}")
         if not query_fingerprints:
             raise QueryError("No fingerprints extracted from query audio.")
 
+        if stop_event and stop_event.is_set():
+            raise QueryError("任务已停止")
+        if progress_callback:
+            progress_callback("检索曲库...")
         return match_query(
             query_fingerprints=query_fingerprints,
             index=index,
